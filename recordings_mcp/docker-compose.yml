@@ -1,0 +1,32 @@
+services:
+  recordings-mcp:
+    build:
+      context: ..
+      dockerfile: recordings_mcp/Dockerfile
+    image: ${RECORDINGS_MCP_IMAGE:?RECORDINGS_MCP_IMAGE must be set}
+    restart: unless-stopped
+    environment:
+      TENANT_ID: ${TENANT_ID:?TENANT_ID must be set}
+      RECORDINGS_MCP_CODE_PREFIX: ${RECORDINGS_MCP_CODE_PREFIX:?RECORDINGS_MCP_CODE_PREFIX must be set}
+      RECORDINGS_MCP_ARCHIVE_DIR: /archive
+      RECORDINGS_MCP_GRANT_STATE: /state/recordings-mcp-state.db
+      RECORDINGS_MCP_HOST: 0.0.0.0
+      RECORDINGS_MCP_PORT: 62390
+      SEMANTIC_SEARCH_ENABLED: ${SEMANTIC_SEARCH_ENABLED:-1}
+      SEMANTIC_INDEX_PATH: /archive/semantic/semantic.db
+      OLLAMA_EMBED_ENDPOINT: http://host.docker.internal:11434
+      SEMANTIC_QUERY_TIMEOUT_S: ${SEMANTIC_QUERY_TIMEOUT_S:-0.75}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ${RECORDINGS_MCP_ARCHIVE_DIR:?set tenant archive}:/archive:ro
+      - ${RECORDINGS_MCP_STATE_DIR:?set writable grant state}:/state:rw
+    ports:
+      - "${RECORDINGS_MCP_BIND_ADDR:-127.0.0.1}:${RECORDINGS_MCP_PUBLISH_PORT:-62390}:62390"
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL

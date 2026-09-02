@@ -1,0 +1,16 @@
+.git
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.venv
+tests
+viewer/tests
+viewer/verify
+verify
+*.db
+*.db-*
+audio
+**/audio
+*.mp3
+.env
+**/.env

@@ -1,0 +1,60 @@
+services:
+  recordings-viewer:
+    build:
+      context: ${RECORDINGS_SOURCE_ROOT:-..}
+      dockerfile: viewer/Dockerfile
+    image: ${VIEWER_IMAGE:-jazzuu-viewer:latest}
+    container_name: ${VIEWER_CONTAINER_NAME:?VIEWER_CONTAINER_NAME must be set}
+    user: "10000:10000"
+    read_only: true
+    tmpfs:
+      - /tmp
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # rendered mind maps (derived data, safe to lose — regenerated on view)
+      MINDMAP_DIR: /cache/mindmaps
+      # Paths only; the credential is read from the read-only tenant mount.
+      RECORDINGS_CONTROL_SOCKET: /run/recordings/control.sock
+      RECORDINGS_CONTROL_TOKEN_FILE: /run/secrets/recordings-control-token
+      TENANT_ID: ${TENANT_ID:?TENANT_ID must be set}
+      # Tenant-local presentation only. Explicit IANA zone per deployment, never
+      # a browser guess and never a fixed offset. Unset keeps prior behaviour.
+      DISPLAY_TIMEZONE: ${DISPLAY_TIMEZONE:-}
+      SEMANTIC_SEARCH_ENABLED: ${SEMANTIC_SEARCH_ENABLED:-1}
+      SEMANTIC_INDEX_PATH: /archive/semantic/semantic.db
+      OLLAMA_EMBED_ENDPOINT: http://host.docker.internal:11434
+      SEMANTIC_QUERY_TIMEOUT_S: ${SEMANTIC_QUERY_TIMEOUT_S:-0.75}
+      # Presentation-only accepted labels; embeddings never enter the viewer.
+      VOICEPRINT_MODEL: ${VOICEPRINT_MODEL:-}
+      VOICEPRINT_MODEL_VERSION: ${VOICEPRINT_MODEL_VERSION:-}
+      PUBLIC_SHARE_ENABLED: ${PUBLIC_SHARE_ENABLED:-0}
+      PUBLIC_SHARE_STORE: /public-shares
+      PUBLIC_SHARE_BASE_URL: ${PUBLIC_SHARE_BASE_URL:-}
+      PUBLIC_SHARE_SECRET_FILE: /run/secrets/public-share-secret
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ${TENANT_ARCHIVE_DIR:?TENANT_ARCHIVE_DIR must be set}:/archive:ro
+      - ${TENANT_CONTROL_TOKEN_FILE:?TENANT_CONTROL_TOKEN_FILE must be set}:/run/secrets/recordings-control-token:ro
+      - ${TENANT_CONTROL_DIR:?TENANT_CONTROL_DIR must be set}:/run/recordings:ro
+      - ${PUBLIC_SHARE_STORE_HOST:?PUBLIC_SHARE_STORE_HOST must be set}:/public-shares
+      - ${PUBLIC_SHARE_SECRET_FILE:?PUBLIC_SHARE_SECRET_FILE must be set}:/run/secrets/public-share-secret:ro
+      - mindmap-cache:/cache
+    ports:
+      - "${VIEWER_BIND_ADDR:-127.0.0.1}:${VIEWER_PORT:?VIEWER_PORT must be set}:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/readyz').status==200 else 1)"]
+      interval: 15s
+      timeout: 4s
+      retries: 3
+      start_period: 8s
+    logging:
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "3"
+
+volumes:
+  mindmap-cache:

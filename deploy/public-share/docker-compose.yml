@@ -1,0 +1,36 @@
+services:
+  public-share-gateway:
+    image: ${VIEWER_IMAGE:?pin an immutable reviewed viewer image}
+    command: ["uvicorn", "app.public_gateway:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]
+    restart: unless-stopped
+    read_only: true
+    environment:
+      PUBLIC_SHARE_STORES: /shares/tenant-alpha:/run/secrets/public_share_secret
+      PUBLIC_SHARE_GATEWAY_STATE: /state/device-auth.db
+      PUBLIC_SHARE_BASE_URL: ${PUBLIC_SHARE_BASE_URL:?set the reviewed HTTPS share origin}
+    secrets:
+      - public_share_secret
+    volumes:
+      - ${PUBLIC_SHARE_STORE:?set the tenant export store}:/shares/tenant-alpha:ro
+      - ${PUBLIC_SHARE_GATEWAY_STATE:?set the gateway state directory}:/state
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz').status==200 else 1)"]
+      interval: 15s
+      timeout: 4s
+      retries: 3
+      start_period: 8s
+    networks:
+      - public-share-edge
+
+secrets:
+  public_share_secret:
+    file: ${PUBLIC_SHARE_SECRET_FILE:?set the tenant secret file path}
+
+networks:
+  public-share-edge:
+    internal: true

@@ -1,0 +1,12 @@
+.env
+archive/connector.env
+recordings_mcp/recordings-mcp.env
+*.db
+*.log
+audio/
+__pycache__/
+*.pyc
+
+# Pillow is installed from viewer/requirements.txt, not vendored: the compiled
+# wheels are platform-specific and 20MB of binaries do not belong in git.
+viewer/app/vendor/

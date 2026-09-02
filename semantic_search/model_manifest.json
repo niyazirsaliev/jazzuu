@@ -1,0 +1,11 @@
+{
+  "adapter": "ollama-native-api",
+  "endpoint": "http://host.docker.internal:11434/api/embed",
+  "model": "bge-m3:latest",
+  "model_digest": "7907646426070047a77226ac3e684fbbe8410524f7b4a74d02837e43f2146bab",
+  "dimension": 1024,
+  "input_policy": "raw-bge-m3",
+  "source": "https://huggingface.co/BAAI/bge-m3",
+  "license": "MIT",
+  "artifact_policy": "Operator-managed Ollama owns the verified model. Recordings images contain no model weights and do not download models."
+}

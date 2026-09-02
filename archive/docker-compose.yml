@@ -1,0 +1,112 @@
+# One PLAUD connector per explicit tenant.
+#
+# Deploy a single tenant:
+#   docker compose --env-file /path/to/<tenant>.connector.env \
+#     -p "rec-connector-<tenant>" up -d --build
+#
+# Isolation model:
+#   - Each tenant gets its own container, its own creds bind mount, and its own
+#     archive directory. A connector can only ever see one account.
+#   - The connector holds NO PLAUD account credentials. That tenant's own MCP
+#     service owns the OAuth tokens and refreshes them; this container only
+#     proves which caller it is, with a bearer token read from a mounted file
+#     on every request so the token can be rotated without a restart.
+#   - The required JSON mapping pins each tenant to one unique MCP endpoint.
+#   - No ports are published. The connector makes outbound calls only; the
+#     viewer is what serves the archive, over its own Tailscale node.
+#
+# Deliberately NOT here: host networking, Docker socket, published ports, any
+# shared volume between tenants.
+
+services:
+  connector:
+    build:
+      context: ..
+      dockerfile: archive/Dockerfile
+      args:
+        BUILD_VERSION: ${BUILD_VERSION:-dev}
+    image: ${CONNECTOR_IMAGE:-jazzuu-connector:latest}
+    restart: unless-stopped
+    environment:
+      TENANT_ID: ${TENANT_ID:?TENANT_ID must be set}
+      ARCHIVE_TIMEZONE: ${ARCHIVE_TIMEZONE:-UTC}
+      # Inside the container the layout is uniform; the host paths differ per
+      # tenant and are supplied by the volume mounts below.
+      TENANT_ARCHIVE_DIR: /archive
+      # The connector's caller credential, as a FILE. Never an env var: a token
+      # in the environment shows up in `docker inspect` and in every crash dump.
+      PLAUD_MCP_TOKEN_FILE: /creds/plaud-mcp-token
+      # Required reviewed mapping and optional assertion. A bare PLAUD_MCP_URL
+      # is intentionally absent.
+      PLAUD_MCP_TENANT_URLS_JSON: ${PLAUD_MCP_TENANT_URLS_JSON:?PLAUD_MCP_TENANT_URLS_JSON must be set}
+      PLAUD_MCP_EXPECTED_URL: ${PLAUD_MCP_EXPECTED_URL:-}
+      RECORDING_CODE_PREFIXES_JSON: ${RECORDING_CODE_PREFIXES_JSON:?RECORDING_CODE_PREFIXES_JSON must be set}
+      # Operator-managed ASR is stateless and holds no identity.
+      # The per-tenant caller token keeps its logs attributable.
+      ASR_MCP_URL: ${ASR_MCP_URL:-}
+      # Map local audio basenames into this tenant's read-only ASR mount.
+      # Empty is safe for deployments that do not use a shared ASR volume.
+      ASR_AUDIO_PATH_PREFIX: ${ASR_AUDIO_PATH_PREFIX:-}
+      ASR_TOKEN_FILE: ${ASR_TOKEN_FILE:?ASR_TOKEN_FILE must be set}
+      # Optional tenant-local voice identity. Empty defaults preserve `unknown`;
+      # each tenant must opt in with its own enrollment and exact model version.
+      VOICEPRINT_ENCODER: ${VOICEPRINT_ENCODER:-}
+      VOICEPRINT_MODEL: ${VOICEPRINT_MODEL:-}
+      VOICEPRINT_MODEL_VERSION: ${VOICEPRINT_MODEL_VERSION:-}
+      # Optional local CPU diarization. Models are immutable host artifacts;
+      # absent or invalid files fail closed to an unavailable stage.
+      DIARIZATION_ENGINE: ${DIARIZATION_ENGINE:-sherpa-onnx}
+      DIARIZATION_SEGMENTATION_MODEL: /models/segmentation/model.onnx
+      DIARIZATION_EMBEDDING_MODEL: /models/embedding.onnx
+      DIARIZATION_THREADS: ${DIARIZATION_THREADS:-2}
+      # Stack-wide ASR window defaults.
+      ASR_SEGMENT_THRESHOLD_SECONDS: ${ASR_SEGMENT_THRESHOLD_SECONDS:-600}
+      ASR_SEGMENT_SECONDS: ${ASR_SEGMENT_SECONDS:-600}
+      # Decode short windows with large-v3, invoke the Kyrgyz specialist when
+      # language/quality signals require it, and merge the chosen utterances.
+      PIPELINE_ASR_ENGINE: ${PIPELINE_ASR_ENGINE:-mixed}
+      # Private connector↔viewer control plane. Both paths are mounted, never
+      # token-valued environment variables; each tenant has its own host dir.
+      RECORDINGS_CONTROL_SOCKET: /run/recordings/control.sock
+      RECORDINGS_CONTROL_TOKEN_FILE: /run/secrets/recordings-control-token
+      SYNC_INTERVAL_S: ${SYNC_INTERVAL_S:-300}
+      MAX_PER_PASS: ${MAX_PER_PASS:-0}
+      RUN_ASR: ${RUN_ASR:-1}
+      RUN_SUMMARIES: ${RUN_SUMMARIES:-1}
+      SEMANTIC_SEARCH_ENABLED: ${SEMANTIC_SEARCH_ENABLED:-1}
+      SEMANTIC_INDEX_PATH: /archive/semantic/semantic.db
+      OLLAMA_EMBED_ENDPOINT: http://host.docker.internal:11434
+      SEMANTIC_QUERY_TIMEOUT_S: ${SEMANTIC_QUERY_TIMEOUT_S:-10}
+      SEMANTIC_REINDEX_BATCH: ${SEMANTIC_REINDEX_BATCH:-8}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # Writable: this is the tenant's archive.db and audio/.
+      - ${TENANT_ARCHIVE_DIR:?TENANT_ARCHIVE_DIR must be set}:/archive
+      # Read-only. This directory carries the caller tokens for PLAUD and ASR,
+      # The PLAUD MCP service owns OAuth refresh. Rotation is the host replacing
+      # a file the connector re-reads.
+      - ${TENANT_CREDS_DIR:?TENANT_CREDS_DIR must be set}:/creds:ro
+      # The viewer's canonical control token lives outside the PLAUD/ASR
+      # credential directory. Mount that exact file at an independent runtime
+      # path, never nested inside read-only /creds and never as a directory.
+      - ${TENANT_CONTROL_TOKEN_FILE:?TENANT_CONTROL_TOKEN_FILE must be set}:/run/secrets/recordings-control-token:ro
+      # Host directory must be tenant-private, uid 10000 and mode 0700. It is
+      # the sole shared namespace for the authenticated Unix socket.
+      - ${TENANT_CONTROL_DIR:?TENANT_CONTROL_DIR must be set}:/run/recordings
+      # Non-biometric immutable artifacts are shared read-only across tenants.
+      # The default lets connectors start safely before staging: an empty host
+      # directory leaves diarization unavailable while every required stage runs.
+      - ${DIARIZATION_MODELS_DIR:-/srv/jazzuu/models/diarization}:/models:ro
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "3"
