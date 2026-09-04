@@ -18,6 +18,9 @@ services:
       # Paths only; the credential is read from the read-only tenant mount.
       RECORDINGS_CONTROL_SOCKET: /run/recordings/control.sock
       RECORDINGS_CONTROL_TOKEN_FILE: /run/secrets/recordings-control-token
+      # Where uploads are staged for the connector to pick up. The viewer never
+      # imports anything itself; it only drops bytes here.
+      VIEWER_UPLOAD_DIR: /uploads
       TENANT_ID: ${TENANT_ID:?TENANT_ID must be set}
       # Tenant-local presentation only. Explicit IANA zone per deployment, never
       # a browser guess and never a fixed offset. Unset keeps prior behaviour.
@@ -41,6 +44,12 @@ services:
       - ${TENANT_CONTROL_DIR:?TENANT_CONTROL_DIR must be set}:/run/recordings:ro
       - ${PUBLIC_SHARE_STORE_HOST:?PUBLIC_SHARE_STORE_HOST must be set}:/public-shares
       - ${PUBLIC_SHARE_SECRET_FILE:?PUBLIC_SHARE_SECRET_FILE must be set}:/run/secrets/public-share-secret:ro
+      # The viewer's only writable path into archive data, and deliberately not
+      # a second view of /archive: that stays read-only above, and this mounts
+      # the uploads subdirectory alone. The connector owns the same directory
+      # through its own /archive mount, verifies each staged file and deletes
+      # it either way, so nothing staged here is trusted or kept.
+      - ${TENANT_ARCHIVE_DIR:?TENANT_ARCHIVE_DIR must be set}/uploads:/uploads
       - mindmap-cache:/cache
     ports:
       - "${VIEWER_BIND_ADDR:-127.0.0.1}:${VIEWER_PORT:?VIEWER_PORT must be set}:8000"

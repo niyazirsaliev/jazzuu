@@ -8,6 +8,9 @@ import stat
 class ControlUnavailable(RuntimeError): pass
 class ControlRejected(RuntimeError): pass
 
+# Import transcodes the whole upload, unlike the sub-second control calls.
+IMPORT_TIMEOUT = 900
+
 
 def _token(path):
     try:
@@ -107,6 +110,29 @@ class ControlClient:
             if isinstance(response, dict) and response.get("error") == "bad_request":
                 raise ControlRejected("rejected")
             raise ControlUnavailable("unavailable")
+        return {key: value for key, value in response.items() if key != "ok"}
+
+    def request_import_upload(self, upload_name, timeout=None):
+        """Ask the connector to import a file already staged in the inbox.
+
+        Import runs ffmpeg over the whole file, so this waits far longer than
+        the ordinary one-second control calls — a phone recording can be hours.
+        """
+        payload = {"token": _token(self.token_path), "action": "import_upload",
+                   "upload_name": upload_name}
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as peer:
+                peer.settimeout(timeout or IMPORT_TIMEOUT)
+                peer.connect(self.socket_path)
+                peer.sendall(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode() + b"\n")
+                response = json.loads(_recv_frame(peer).decode())
+        except (OSError, ValueError, UnicodeError) as exc:
+            raise ControlUnavailable("unavailable") from exc
+        if not isinstance(response, dict) or not response.get("ok"):
+            reason = response.get("error") if isinstance(response, dict) else None
+            if reason in {"not_audio", "too_large", "not_found", "bad_request"}:
+                raise ControlRejected(reason)
+            raise ControlUnavailable(reason or "unavailable")
         return {key: value for key, value in response.items() if key != "ok"}
 
     def request_source_poll(self):

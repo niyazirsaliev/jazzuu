@@ -1,9 +1,9 @@
 // Jazzuu app-shell service worker.
 // Caches the static shell for offline open. NEVER caches /api or /audio.
-// v25 adds an independently persisted report-language selector.
+// v26 adds bounded browser audio uploads.
 // `skipWaiting` + `clients.claim` below means an
 // installed PWA receives this replacement on its ordinary next open/refresh.
-const CACHE = 'zapisi-shell-v25';
+const CACHE = 'zapisi-shell-v26';
 const SHELL = ['/', '/index.html', '/app.js', '/asr-progress.js', '/identity-selector.js', '/manifest.json', '/icon-192.png', '/icon-512.png'];
 const SHELL_PATHS = new Set(SHELL);
 

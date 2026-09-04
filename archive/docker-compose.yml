@@ -78,6 +78,10 @@ services:
       OLLAMA_EMBED_ENDPOINT: http://host.docker.internal:11434
       SEMANTIC_QUERY_TIMEOUT_S: ${SEMANTIC_QUERY_TIMEOUT_S:-10}
       SEMANTIC_REINDEX_BATCH: ${SEMANTIC_REINDEX_BATCH:-8}
+      # Inbox the viewer stages uploads into; the connector verifies and imports
+      # from here, then deletes. Lives inside the archive mount, so no extra
+      # volume is needed. Empty disables uploads.
+      UPLOAD_DIR: /archive/uploads
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:

@@ -121,5 +121,5 @@ test('service worker caches only exact same-origin shell resources without query
 
 test('localization release advances the installed shell cache identity', () => {
   const source = fs.readFileSync(path.join(__dirname, '../app/static/sw.js'), 'utf8');
-  assert.match(source, /zapisi-shell-v25/);
+  assert.match(source, /zapisi-shell-v26/);
 });

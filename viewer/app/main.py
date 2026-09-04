@@ -1,10 +1,13 @@
+import asyncio
 import base64
+import contextlib
 import glob
 import hashlib
 import hmac
 import json
 import os
 import re
+import secrets
 import shutil
 import sqlite3
 import tempfile
@@ -24,6 +27,7 @@ from fastapi.responses import (
     StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
+from starlette.requests import ClientDisconnect
 
 from . import (asr_progress, control_client, mindmap, mindtree, public_share,
                recording_number, identity_api, search as recordings_search,
@@ -129,6 +133,7 @@ MSG_RU = {
     "no_csrf": "Сессия устарела. Обновите страницу и повторите.",
     "unavailable": "Сервис временно не может принять запрос. Попробуйте позже.",
     "no_speaker": "Такого спикера в этой записи нет.",
+    "upload_rejected": "Не удалось принять файл: нужен аудиофайл не больше 500 МБ.",
 }
 
 # Set at image build time (Dockerfile ARG); shows which code is actually live.
@@ -1318,6 +1323,65 @@ identity_api.configure(
     recording_exists=lambda rec_id: _recording_row(rec_id) is not None,
 )
 app.include_router(identity_api.router)
+
+
+UPLOAD_DIR = os.environ.get("VIEWER_UPLOAD_DIR", "")
+# Matches the connector's own cap; enforced here too so a huge body is refused
+# before it is written to disk rather than after.
+MAX_UPLOAD_BYTES = 500 * 1024 * 1024
+
+
+@app.post("/api/uploads")
+async def upload_recording(request: Request):
+    """Accept one audio file from the browser and hand it to the connector.
+
+    The viewer stages bytes and nothing more: it may write only into the upload
+    inbox, under a name it generates, and the connector re-checks size and
+    content before importing. A rejected or half-sent upload is deleted here,
+    so a failed attempt cannot accumulate on disk.
+    """
+    if not csrf_ok(request):
+        return _bad(MSG_RU["no_csrf"], status=403)
+    if not UPLOAD_DIR:
+        return _bad(MSG_RU["unavailable"], status=503)
+
+    staged_name = f"{secrets.token_hex(16)}.upload"
+    staged = os.path.join(UPLOAD_DIR, staged_name)
+    written = 0
+    try:
+        if request.headers.get("content-type", "").split(";", 1)[0].lower() != "application/octet-stream":
+            return _bad(MSG_RU["bad_request"])
+        with open(staged, "wb") as sink:
+            async for chunk in request.stream():
+                written += len(chunk)
+                if written > MAX_UPLOAD_BYTES:
+                    raise ValueError("too large")
+                sink.write(chunk)
+        if not written:
+            raise ValueError("empty")
+    except ValueError:
+        _discard_upload(staged)
+        return _bad(MSG_RU["upload_rejected"])
+    except (OSError, ClientDisconnect):
+        _discard_upload(staged)
+        return _bad(MSG_RU["unavailable"], status=503)
+
+    try:
+        result = await asyncio.to_thread(
+            control_client.ControlClient().request_import_upload, staged_name)
+    except control_client.ControlRejected:
+        _discard_upload(staged)
+        return _bad(MSG_RU["upload_rejected"])
+    except control_client.ControlUnavailable:
+        _discard_upload(staged)
+        return _bad(MSG_RU["unavailable"], status=503)
+    return {"recording_number": result.get("recording_number"),
+            "message_ru": "Запись загружена и обрабатывается"}
+
+
+def _discard_upload(path):
+    with contextlib.suppress(OSError):
+        os.unlink(path)
 
 
 @app.post("/api/source/poll")

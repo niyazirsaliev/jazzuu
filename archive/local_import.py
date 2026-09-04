@@ -18,6 +18,7 @@ import time
 
 
 LOCAL_TITLE_SEED = "Локальная аудиозапись"
+NORMALIZE_TIMEOUT = 840
 
 
 def semantic_seed(_original_name: str | None = None) -> str:
@@ -27,8 +28,11 @@ def semantic_seed(_original_name: str | None = None) -> str:
 
 def provenance_metadata(item: dict) -> dict:
     """Build private dedup/audit metadata for one local source."""
+    source = item.get("source")
+    if source not in (None, "upload"):
+        raise ValueError("unsupported local import source")
     return {
-        "source_kind": "nextcloud_external_import",
+        "source_kind": "browser_upload" if source == "upload" else "nextcloud_external_import",
         "original_name": item["original_name"],
         "source_sha256": item["source_sha256"],
         "source_size": item["source_size"],
@@ -85,17 +89,21 @@ def normalize_audio(item, final):
         raise RuntimeError("source verification failed")
     if not os.path.isfile(final):
         temp = f"{final}.tmp"
-        subprocess.run(
-            [
-                "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
-                "-i", source, "-vn", "-codec:a", "libmp3lame", "-q:a", "2", "-f", "mp3", temp,
-            ],
-            check=True,
-        )
-        duration = probe_duration(temp)
-        if abs(duration - float(item["source_duration_seconds"])) > 1.0:
-            raise RuntimeError("normalized MP3 duration mismatch")
-        os.replace(temp, final)
+        try:
+            subprocess.run(
+                [
+                    "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+                    "-i", source, "-vn", "-codec:a", "libmp3lame", "-q:a", "2", "-f", "mp3", temp,
+                ],
+                check=True, timeout=NORMALIZE_TIMEOUT,
+            )
+            duration = probe_duration(temp)
+            if abs(duration - float(item["source_duration_seconds"])) > 1.0:
+                raise RuntimeError("normalized MP3 duration mismatch")
+            os.replace(temp, final)
+        finally:
+            if os.path.exists(temp):
+                os.unlink(temp)
     return probe_duration(final)
 
 

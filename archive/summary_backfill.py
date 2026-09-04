@@ -209,7 +209,8 @@ def _promote_local_semantic_title(conn, rid, title):
         metadata = json.loads(row[0]) if row and row[0] else {}
     except (TypeError, ValueError):
         metadata = {}
-    if not isinstance(metadata, dict) or metadata.get("source_kind") != "nextcloud_external_import":
+    if (not isinstance(metadata, dict)
+            or metadata.get("source_kind") not in {"nextcloud_external_import", "browser_upload"}):
         return
     conn.execute("UPDATE recordings SET name=? WHERE id=?", (title, rid))
     has_fts = conn.execute(

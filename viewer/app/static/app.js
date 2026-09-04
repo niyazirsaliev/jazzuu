@@ -521,6 +521,14 @@ document.addEventListener('visibilitychange', () => { asrPoller.onVisibilityChan
 // safe (' and \), so an id carrying an apostrophe could otherwise close the
 // onclick's string and have the rest of itself executed as code. Ids come from
 // the archive, and nothing upstream promises they are alphanumeric.
+
+// File inputs report a choice with 'change', not 'click', so the header's
+// upload control needs its own delegated listener.
+app.addEventListener('change', (event) => {
+  const input = event.target.closest('[data-upload]');
+  if (input) uploadRecording(input);
+});
+
 app.addEventListener('click', (event) => {
   const target = event.target;
   if (!target || typeof target.closest !== 'function') return;
@@ -656,11 +664,17 @@ function header(title, opts = {}) {
   const sourcePoll = opts.sourcePoll
     ? `<button type="button" data-source-poll aria-label="Проверить PLAUD" title="Проверить PLAUD" class="min-w-11 min-h-11 inline-flex items-center justify-center rounded-full active:bg-white/5 disabled:opacity-50"><svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="#f2f2f5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 15v4h14v-4"/></svg></button>`
     : '';
+  // Upload sits next to the PLAUD check: both add a recording to the same feed,
+  // one from the recorder and one from the phone you are holding. A real file
+  // input, so the phone offers its own recorder and files app.
+  const upload = opts.sourcePoll
+    ? `<label data-upload-label aria-label="Загрузить запись" title="Загрузить запись" class="min-w-11 min-h-11 inline-flex cursor-pointer items-center justify-center rounded-full active:bg-white/5"><input type="file" data-upload accept="audio/*,video/*" class="sr-only"><svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="#f2f2f5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V7"/><path d="m7 12 5-5 5 5"/><path d="M5 19v2h14v-2"/></svg></label>`
+    : '';
   const languageToggle = languageToggleHtml();
   const right = opts.search
-    ? `<div data-header-actions class="flex shrink-0 items-center gap-0.5">${languageToggle}${refresh}${sourcePoll}<button data-archive-nav aria-label="Архив" title="Архив" onclick="location.hash='#/archive'" class="min-w-11 min-h-11 inline-flex items-center justify-center rounded-full active:bg-white/5"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#f2f2f5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M5 6l1 14h12l1-14"/><path d="M9 10h6"/><path d="M4 3h16v3H4z"/></svg></button><button aria-label="Поиск" onclick="location.hash='#/search'" class="min-w-11 min-h-11 -mr-2 flex items-center justify-center rounded-full active:bg-white/5">
+    ? `<div data-header-actions class="flex shrink-0 items-center gap-0.5">${languageToggle}${refresh}${upload}${sourcePoll}<button data-archive-nav aria-label="Архив" title="Архив" onclick="location.hash='#/archive'" class="min-w-11 min-h-11 inline-flex items-center justify-center rounded-full active:bg-white/5"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#f2f2f5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M5 6l1 14h12l1-14"/><path d="M9 10h6"/><path d="M4 3h16v3H4z"/></svg></button><button aria-label="Поиск" onclick="location.hash='#/search'" class="min-w-11 min-h-11 -mr-2 flex items-center justify-center rounded-full active:bg-white/5">
          <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="#f2f2f5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4-4"/></svg>
-       </button></div>` : `<div data-header-actions class="flex shrink-0 items-center">${languageToggle}${refresh}${sourcePoll}</div>`;
+       </button></div>` : `<div data-header-actions class="flex shrink-0 items-center">${languageToggle}${refresh}${upload}${sourcePoll}</div>`;
   const sourceStatus = opts.sourcePoll
     ? `<p data-source-poll-status role="status" aria-live="polite" class="absolute right-4 top-full max-w-[calc(100vw-2rem)] rounded-b-lg bg-card px-2 py-1 text-[12px] text-mut shadow-lg empty:hidden">${esc(_sourcePollStatus)}</p>`
     : '';
@@ -707,6 +721,42 @@ async function requestSourcePoll(button) {
     setStatus(e.messageRu || 'Не удалось запустить проверку PLAUD.');
   } finally {
     setTimeout(() => { if (button.isConnected) button.disabled = false; }, 1800);
+  }
+}
+
+async function uploadRecording(input) {
+  const file = input.files && input.files[0];
+  if (!file) return;
+  const label = input.closest('[data-upload-label]');
+  const setStatus = (message) => {
+    _sourcePollStatus = message;
+    const status = document.querySelector('[data-source-poll-status]');
+    if (status) status.innerHTML = esc(message);
+  };
+  // Transcoding a long recording takes a while and the feed will not show it
+  // until the connector is done, so say so instead of appearing to hang.
+  setStatus(`Загружаю «${file.name}»…`);
+  if (label) label.classList.add('opacity-50', 'pointer-events-none');
+  try {
+    const send = (token) => fetch('/api/uploads', {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'X-CSRF-Token': token || '', 'Content-Type': 'application/octet-stream' },
+      body: file,
+    });
+    let r = await send(await csrfToken());
+    if (r.status === 403) r = await send(await csrfToken(true));
+    if (r.status === 401) { showAuthWall(); return; }
+    let data = null;
+    try { data = await r.json(); } catch (e) { data = null; }
+    if (!r.ok) { setStatus((data && data.message_ru) || 'Не удалось загрузить файл.'); return; }
+    setStatus((data && data.message_ru) || 'Запись загружена');
+    refreshCurrentView(document.querySelector('[data-view-refresh]'));
+  } catch (e) {
+    setStatus('Не удалось загрузить файл.');
+  } finally {
+    // Always clear: picking the same file twice must fire change again.
+    input.value = '';
+    if (label) label.classList.remove('opacity-50', 'pointer-events-none');
   }
 }
 

@@ -831,7 +831,9 @@ def main() -> int:
         control_server = control.ControlServer(
             TENANT.db_path, CONTROL_SOCKET, CONTROL_TOKEN_FILE, waker=waker,
             source_poll=source_requests.request,
-            audio_dir=TENANT.audio_dir, cache_dirs=tuple(path for path in (
+            audio_dir=TENANT.audio_dir,
+            upload_dir=os.environ.get("UPLOAD_DIR", "") or None,
+            cache_dirs=tuple(path for path in (
                 os.environ.get("MINDMAP_DIR", ""), os.environ.get("SUMMARY_CARD_DIR", "")) if path))
         control_server.start()
     except (control.ControlUnavailable, OSError) as exc:

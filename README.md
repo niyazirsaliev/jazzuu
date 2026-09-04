@@ -85,6 +85,11 @@ Readers choose a report language on the Summary tab. Jazzuu stores each
 generated variant separately; changing it never rewrites the transcript or
 the canonical summary.
 
+On the feed, the upload button accepts an audio or video file from the phone's
+recorder/files picker. Uploads are streamed into that tenant's isolated inbox,
+limited to 500 MB, content-checked by `ffprobe`, then imported into the same
+ASR pipeline as other recordings.
+
 Choose the specialist profile in the Tilmech deployment:
 
 ```env
@@ -111,7 +116,7 @@ in `archive/connector.env`:
 cp archive/connector.env.example archive/connector.env
 cp viewer/.env.example viewer/.env
 cp recordings_mcp/recordings-mcp.env.example recordings_mcp/recordings-mcp.env
-install -d -m 700 /tmp/jazzuu/{archive,creds,control,public-shares,mcp-state,gateway,models/diarization}
+install -d -m 700 /tmp/jazzuu/{archive/uploads,creds,control,public-shares,mcp-state,gateway,models/diarization}
 python3 -c 'import secrets; open("/tmp/jazzuu/recordings-control-token","w").write(secrets.token_urlsafe(32))'
 chmod 600 /tmp/jazzuu/recordings-control-token
 python3 -c 'import secrets; open("/tmp/jazzuu/public-share-secret","w").write(secrets.token_urlsafe(32))'

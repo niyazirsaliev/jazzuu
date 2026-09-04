@@ -5,6 +5,8 @@ import sqlite3
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "archive"))
 
@@ -92,7 +94,8 @@ def test_normal_connector_path_runs_idempotent_existing_summary_backfill():
     assert "summary_module.ensure_attempts(conn)" in source
 
 
-def test_summary_publication_promotes_generated_title_for_local_import_and_updates_fts(monkeypatch):
+@pytest.mark.parametrize("source_kind", ["nextcloud_external_import", "browser_upload"])
+def test_summary_publication_promotes_generated_title_for_local_import_and_updates_fts(monkeypatch, source_kind):
     conn = sqlite3.connect(":memory:")
     conn.executescript(
         """
@@ -102,9 +105,7 @@ def test_summary_publication_promotes_generated_title_for_local_import_and_updat
         CREATE VIRTUAL TABLE recordings_fts USING fts5(id UNINDEXED,name,transcript);
         """
     )
-    provenance = json.dumps(
-        {"source_kind": "nextcloud_external_import", "original_name": "technical-source.m4a"}
-    )
+    provenance = json.dumps({"source_kind": source_kind, "original_name": "technical-source.m4a"})
     conn.execute(
         "INSERT INTO recordings VALUES(?,?,?,?,?,?,?)",
         ("local", "Локальная аудиозапись", "x" * 200, "", "old", "{}", provenance),

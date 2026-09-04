@@ -6,15 +6,21 @@ pipeline intent and speaker aliases.  It deliberately exposes no HTTP port.
 """
 from __future__ import annotations
 
+import contextlib
 import hmac
 import hashlib
 import json
 import os
 import re
+import signal
 import socket
 import sqlite3
 import stat
+import subprocess
+import sys
 import threading
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pipeline
@@ -27,6 +33,11 @@ MAX_ALIAS_LEN = 60
 MAX_COMMENT_LEN = 2000
 MAX_COMMENTS_PER_RECORDING = 500
 MAX_LABEL_NAME = 40
+# Uploads: the viewer names the staged file, so the name is a hex id it cannot
+# use to escape the inbox. 500MB is roughly eight hours of phone audio.
+MAX_UPLOAD_BYTES = 500 * 1024 * 1024
+UPLOAD_IMPORT_TIMEOUT = 900
+_UPLOAD_NAME_RE = re.compile(r"[a-f0-9]{32}\.upload\Z")
 _RECORDING_RE = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
 _SPEAKER_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,47}\Z")
 _TASK_RE = re.compile(r"[a-f0-9]{24}\Z")
@@ -34,7 +45,7 @@ _FORBIDDEN_NAME = re.compile(r"[\x00-\x1f\x7f<>&\"\\`]")
 ACTIONS = frozenset(("rename", "retranscribe", "regenerate", "diarize",
                       "add_comment", "set_task_completed", "set_label",
                       "archive", "restore", "delete", "source_poll", "summary_en",
-                      "summary_language"))
+                      "summary_language", "import_upload"))
 
 
 class ControlUnavailable(RuntimeError):
@@ -352,9 +363,58 @@ def _recv_frame(peer, limit=MAX_REQUEST_BYTES):
             return frame
 
 
+def _upload_duration(path):
+    """Seconds of decodable audio in `path`, or None if it is not audio.
+
+    Content decides, not the filename: a phone can hand us .m4a, .mp3, .wav or
+    a video container with an audio track, and a hostile client can hand us
+    anything at all with an audio extension. ffprobe answers the only question
+    that matters — is there an audio stream we can actually decode.
+    """
+    try:
+        out = subprocess.check_output(
+            ["ffprobe", "-v", "error", "-select_streams", "a:0",
+             "-show_entries", "stream=codec_type:format=duration",
+             "-of", "json", path],
+            stderr=subprocess.DEVNULL, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    try:
+        probe = json.loads(out)
+        streams = probe.get("streams") or []
+        if not streams or streams[0].get("codec_type") != "audio":
+            return None
+        seconds = float((probe.get("format") or {}).get("duration") or 0.0)
+    except (ValueError, TypeError, KeyError):
+        return None
+    return seconds if seconds > 0 else None
+
+
+def _run_process_group(argv, *, timeout):
+    """Run one importer and kill its complete process group on timeout."""
+    process = subprocess.Popen(
+        argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        start_new_session=True)
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGTERM)
+        try:
+            process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+            process.communicate()
+        raise
+    return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
+
+
 class ControlServer:
-    def __init__(self, db_path, socket_path, token_path, *, waker=None, source_poll=None, audio_dir=None, cache_dirs=()):
+    def __init__(self, db_path, socket_path, token_path, *, waker=None, source_poll=None, audio_dir=None, cache_dirs=(), upload_dir=None):
         self.db_path, self.socket_path, self.token_path = db_path, socket_path, token_path
+        self.upload_dir = upload_dir
+        self._upload_lock = threading.Lock()
         self.waker = waker or pipeline.Waker()
         self.source_poll = source_poll
         self.audio_dir = audio_dir or os.path.join(os.path.dirname(os.path.abspath(db_path)), "audio")
@@ -394,17 +454,113 @@ class ControlServer:
         try: os.unlink(self.socket_path)
         except FileNotFoundError: pass
 
+    def _serve_peer(self, peer):
+        with peer:
+            peer.settimeout(1)
+            try:
+                payload = _recv_frame(peer)
+            except OSError:
+                return
+            response = self._handle(payload)
+            try:
+                peer.sendall(json.dumps(response, ensure_ascii=False, separators=(",", ":")).encode() + b"\n")
+            except OSError:
+                pass
+
     def _serve(self):
         while not self._stop.is_set():
-            try: peer, _ = self._listener.accept()
-            except (TimeoutError, OSError): continue
-            with peer:
-                peer.settimeout(1)
-                try: payload = _recv_frame(peer)
-                except OSError: continue
-                response = self._handle(payload)
-                try: peer.sendall(json.dumps(response, ensure_ascii=False, separators=(",", ":")).encode() + b"\n")
-                except OSError: pass
+            try:
+                peer, _ = self._listener.accept()
+            except (TimeoutError, OSError):
+                continue
+            threading.Thread(target=self._serve_peer, args=(peer,), daemon=True).start()
+
+    def _import_upload(self, upload_name):
+        """Import one file the viewer staged in the upload inbox.
+
+        The viewer can write to the inbox but nothing else, and it is the
+        untrusted side: it may lie about the name, the type and the size. So
+        the name is resolved strictly inside the inbox, ffprobe decides whether
+        the bytes are really audio, and the file is consumed either way — a
+        rejected upload must not be left behind for the next caller to retry.
+        """
+        if not isinstance(upload_name, str) or not _UPLOAD_NAME_RE.fullmatch(upload_name):
+            raise ControlRejected("bad")
+        if not self.upload_dir:
+            return {"ok": False, "error": "uploads_disabled"}
+        if not self._upload_lock.acquire(blocking=False):
+            return {"ok": False, "error": "busy"}
+        try:
+            return self._consume_upload(upload_name)
+        finally:
+            self._upload_lock.release()
+
+    def _consume_upload(self, upload_name):
+        inbox = os.path.realpath(self.upload_dir)
+        staged = os.path.join(inbox, upload_name)
+        processing_dir = os.path.join(os.path.dirname(inbox), ".upload-processing")
+        os.makedirs(processing_dir, mode=0o700, exist_ok=True)
+        processing = os.path.join(processing_dir, upload_name)
+        try:
+            os.replace(staged, processing)
+        except FileNotFoundError:
+            return {"ok": False, "error": "not_found"}
+        try:
+            if not stat.S_ISREG(os.lstat(processing).st_mode):
+                return {"ok": False, "error": "not_audio"}
+            if os.path.getsize(processing) > MAX_UPLOAD_BYTES:
+                return {"ok": False, "error": "too_large"}
+            duration = _upload_duration(processing)
+            if duration is None:
+                return {"ok": False, "error": "not_audio"}
+            return self._run_local_import(processing, upload_name, duration)
+        finally:
+            with contextlib.suppress(OSError):
+                os.unlink(processing)
+
+    def _run_local_import(self, staged, upload_name, duration):
+        """Hand the verified file to the existing local-import path.
+
+        local_import re-verifies size and digest against the manifest before
+        transcoding, so those fields are part of the contract, not decoration.
+        """
+        size = os.path.getsize(staged)
+        digest = hashlib.sha256()
+        with open(staged, "rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(block)
+        item = {
+            "id": hashlib.sha256(
+                f"{upload_name}:{size}:{time.time()}".encode()).hexdigest()[:32],
+            "original_name": upload_name,
+            "staged_source": staged,
+            "source": "upload",
+            "source_size": size,
+            "source_sha256": digest.hexdigest(),
+            "source_duration_seconds": duration,
+            # Upload time is the only timestamp available: a browser upload
+            # carries no recorder clock, and file mtime is the staging write.
+            "creation_time": datetime.now(timezone.utc).isoformat(
+                timespec="seconds").replace("+00:00", "Z"),
+        }
+        manifest = staged + ".json"
+        with open(manifest, "w", encoding="utf-8") as handle:
+            json.dump(item, handle)
+        try:
+            result = _run_process_group(
+                [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                              "local_import.py"), manifest],
+                timeout=UPLOAD_IMPORT_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "error": "import_failed"}
+        finally:
+            with contextlib.suppress(OSError):
+                os.unlink(manifest)
+        if result.returncode != 0:
+            return {"ok": False, "error": "import_failed"}
+        payload = json.loads(result.stdout or "{}")
+        self.waker.wake()
+        return {"ok": True, "recording_number": payload.get("recording_number")}
 
     def _handle(self, raw):
         try:
@@ -412,7 +568,7 @@ class ControlServer:
             request = json.loads(raw.decode("utf-8"))
             allowed = {"token", "action", "recording_id", "aliases", "comment", "task_id", "completed",
                        "label_id", "label_name", "active", "display_name", "is_self",
-                       "consent_status", "person_id", "speaker_id", "language"}
+                       "consent_status", "person_id", "speaker_id", "language", "upload_name"}
             if not isinstance(request, dict) or set(request) - allowed: raise ControlRejected("bad")
             presented, expected = request.get("token"), _token(self.token_path)
             if not isinstance(presented, str) or not hmac.compare_digest(presented, expected): return {"ok": False, "error": "unauthorized"}
@@ -420,6 +576,10 @@ class ControlServer:
                 if set(request) != {"token", "action"} or self.source_poll is None:
                     raise ControlRejected("bad")
                 return {"ok": True, "state": self.source_poll()}
+            if request.get("action") == "import_upload":
+                if set(request) != {"token", "action", "upload_name"}:
+                    raise ControlRejected("bad")
+                return self._import_upload(request["upload_name"])
             if request.get("action") in {"create_label", "delete_label"}:
                 needed = {"token", "action", "label_name"} if request["action"] == "create_label" else {"token", "action", "label_id"}
                 if set(request) != needed: raise ControlRejected("bad")
