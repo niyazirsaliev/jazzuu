@@ -921,6 +921,24 @@ test('English summary shows honest pending and failed retry states', async () =>
 });
 
 
+test('reader accepts an arbitrary report language independently of the shell', async () => {
+  const app = boot((url) => {
+    if (url === '/api/recordings?page=cursor') return {items:[feedRow()],next_cursor:null};
+    if (url === '/api/recordings?page=cursor&lang=ja') return {items:[feedRow({summary:'日本語'})],next_cursor:null};
+    if (url === '/api/recordings/rec1') return detailPayload();
+    if (url === '/api/recordings/rec1?lang=ja') return detailPayload({summary:'日本語',summary_language:'ja',summary_state:{language:'ja',state:'ready',retryable:false}});
+    throw new Error('unexpected request ' + url);
+  });
+  await app.flush();
+  await app.navigate('#/r/rec1');
+  app.evalIn("setSummaryLanguage('ja')");
+  await app.flush();
+  assert.ok(app.requests.includes('/api/recordings/rec1?lang=ja'));
+  assert.match(app.html(), /data-summary-language/);
+  assert.match(app.html(), /value="ja"/);
+});
+
+
 test('archive uses the same stable 20-row cursor paging', async () => {
   const calls=[];
   const first=Array.from({length:20},(_,i)=>feedRow({id:`a${i}`,title:`Archived ${i}`}));

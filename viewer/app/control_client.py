@@ -45,7 +45,7 @@ class ControlClient:
 
     def request(self, action, recording_id, aliases=None, *, comment=None,
                 task_id=None, completed=None, label_id=None, label_name=None,
-                active=None):
+                active=None, language=None):
         payload = {"token": _token(self.token_path), "action": action, "recording_id": recording_id}
         if aliases is not None: payload["aliases"] = aliases
         if comment is not None: payload["comment"] = comment
@@ -54,6 +54,7 @@ class ControlClient:
         if label_id is not None: payload["label_id"] = label_id
         if label_name is not None: payload["label_name"] = label_name
         if active is not None: payload["active"] = active
+        if language is not None: payload["language"] = language
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as peer:
                 peer.settimeout(1); peer.connect(self.socket_path)

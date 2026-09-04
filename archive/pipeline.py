@@ -75,6 +75,30 @@ def stamp() -> str:
     return time.strftime('%Y-%m-%dT%H:%M:%S%z')
 
 
+def normalize_summary_language(value: str) -> str:
+    """Return a compact BCP-47-style language tag or reject it."""
+    language = value.strip().lower() if isinstance(value, str) else ""
+    if not re.fullmatch(r"[a-z]{2,3}(?:-[a-z0-9]{2,8}){0,3}", language):
+        raise ValueError("invalid summary language")
+    return language
+
+
+def ensure_summary_variants_schema(conn) -> None:
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='recording_summary_variants'"
+    ).fetchone()
+    if row and "CHECK(language IN ('en'))" not in (row[0] or ""):
+        return
+    if row:
+        conn.execute("DROP TABLE IF EXISTS recording_summary_variants_new")
+        conn.execute("CREATE TABLE recording_summary_variants_new(recording_id TEXT NOT NULL,language TEXT NOT NULL,summary TEXT NOT NULL,summary_json TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(recording_id,language))")
+        conn.execute("INSERT INTO recording_summary_variants_new SELECT * FROM recording_summary_variants")
+        conn.execute("DROP TABLE recording_summary_variants")
+        conn.execute("ALTER TABLE recording_summary_variants_new RENAME TO recording_summary_variants")
+    else:
+        conn.execute("CREATE TABLE recording_summary_variants(recording_id TEXT NOT NULL,language TEXT NOT NULL,summary TEXT NOT NULL,summary_json TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(recording_id,language))")
+
+
 def ensure_schema(conn) -> None:
     """Create the job table. Safe to run on every entry point, every pass.
 
@@ -99,6 +123,7 @@ def ensure_schema(conn) -> None:
         revival_attempts INTEGER NOT NULL DEFAULT 0,
         tool_attempts INTEGER NOT NULL DEFAULT 0,
         catalog_revision INTEGER,
+        summary_language TEXT,
         updated_at TEXT,
         UNIQUE(recording_id, stage))''')
     # Archives created before viewer-initiated replacements have the durable
@@ -116,6 +141,8 @@ def ensure_schema(conn) -> None:
         conn.execute('ALTER TABLE pipeline_jobs ADD COLUMN tool_attempts INTEGER NOT NULL DEFAULT 0')
     if 'catalog_revision' not in columns:
         conn.execute('ALTER TABLE pipeline_jobs ADD COLUMN catalog_revision INTEGER')
+    if 'summary_language' not in columns:
+        conn.execute('ALTER TABLE pipeline_jobs ADD COLUMN summary_language TEXT')
     conn.commit()
 
 
@@ -282,16 +309,17 @@ def request_regenerate(conn, rid, now=None, commit=True, catalog_revision=None) 
 
 def request_summary_language(conn, rid, language, now=None, commit=True) -> bool:
     """Idempotently queue one isolated lazy summary language variant."""
-    if language != "en":
-        raise ValueError("unsupported summary language")
+    language = normalize_summary_language(language)
     seconds = now_epoch(now)
-    row = conn.execute('SELECT state FROM pipeline_jobs WHERE recording_id=? AND stage=?', (rid, STAGE_SUMMARY_EN)).fetchone()
+    row = conn.execute("SELECT state,COALESCE(summary_language,'en') FROM pipeline_jobs WHERE recording_id=? AND stage=?", (rid, STAGE_SUMMARY_EN)).fetchone()
     if row and row[0] in OPEN_STATES:
+        if row[1] != language:
+            raise ValueError("another summary language is already queued")
         return False
     if row:
-        cur = conn.execute("UPDATE pipeline_jobs SET state=?, attempts=0, last_error=NULL, enqueued_epoch=?, available_epoch=?, claim_epoch=NULL, claim_owner=NULL, progress_epoch=NULL, force_local=0, force_replace=0, updated_at=? WHERE recording_id=? AND stage=? AND state NOT IN (?,?,?)", (JOB_QUEUED, seconds, seconds, stamp(), rid, STAGE_SUMMARY_EN, *OPEN_STATES))
+        cur = conn.execute("UPDATE pipeline_jobs SET state=?, attempts=0, last_error=NULL, enqueued_epoch=?, available_epoch=?, claim_epoch=NULL, claim_owner=NULL, progress_epoch=NULL, force_local=0, force_replace=0, summary_language=?, updated_at=? WHERE recording_id=? AND stage=? AND state NOT IN (?,?,?)", (JOB_QUEUED, seconds, seconds, language, stamp(), rid, STAGE_SUMMARY_EN, *OPEN_STATES))
     else:
-        cur = conn.execute("INSERT INTO pipeline_jobs(recording_id,stage,state,attempts,enqueued_epoch,available_epoch,updated_at) VALUES(?,?,?,0,?,?,?)", (rid, STAGE_SUMMARY_EN, JOB_QUEUED, seconds, seconds, stamp()))
+        cur = conn.execute("INSERT INTO pipeline_jobs(recording_id,stage,state,attempts,enqueued_epoch,available_epoch,summary_language,updated_at) VALUES(?,?,?,0,?,?,?,?)", (rid, STAGE_SUMMARY_EN, JOB_QUEUED, seconds, seconds, language, stamp()))
     if commit:
         conn.commit()
     return cur.rowcount == 1
@@ -329,7 +357,7 @@ LEASE_SEC = int(os.environ.get('PIPELINE_LEASE_SECONDS', str(2 * 3600 + 600)))
 JOB_COLUMNS =('seq', 'recording_id', 'stage', 'state', 'attempts',
                'last_error', 'enqueued_epoch', 'available_epoch',
                'claim_epoch', 'claim_owner', 'progress_epoch', 'force_local', 'force_replace',
-               'revival_attempts', 'tool_attempts', 'catalog_revision')
+               'revival_attempts', 'tool_attempts', 'catalog_revision', 'summary_language')
 
 
 def claim_owner() -> str:

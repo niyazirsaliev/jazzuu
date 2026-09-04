@@ -336,22 +336,23 @@ def summary_stage(conn, job, summary_module, sid):
 
 
 def summary_en_stage(conn, job, summary_module, sid):
-    """Translate the canonical Russian summary into an isolated variant."""
+    """Translate the canonical summary into an isolated language variant."""
     rid = job['recording_id']
     ensure_schema(conn)
-    conn.execute("CREATE TABLE IF NOT EXISTS recording_summary_variants(recording_id TEXT NOT NULL, language TEXT NOT NULL CHECK(language IN ('en')), summary TEXT NOT NULL, summary_json TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(recording_id, language))")
+    pipeline.ensure_summary_variants_schema(conn)
+    language = pipeline.normalize_summary_language(job.get('summary_language') or 'en')
     row = conn.execute("SELECT COALESCE(name,''),COALESCE(summary,''),COALESCE(summary_json,'') FROM recordings WHERE id=?", (rid,)).fetchone()
     if not row or not (row[1].strip() or row[2].strip()):
         raise pipeline.StageDeferred('canonical Russian summary is not ready')
     source = row[2].strip() or row[1].strip()
-    result = summary_module.call('summarize_transcript', {'transcript': source, 'title': row[0], 'target_language': 'en'}, sid)
+    result = summary_module.call('summarize_transcript', {'transcript': source, 'title': row[0], 'target_language': language}, sid)
     markdown = result.get('summary_markdown') if isinstance(result, dict) else None
     structured = result.get('structured') if isinstance(result, dict) else None
     if not isinstance(markdown, str) or not markdown.strip() or not isinstance(structured, dict):
-        raise RuntimeError('English summary tool returned invalid output')
+        raise RuntimeError('summary translation tool returned invalid output')
     if not pipeline.holds_claim(conn, job):
         raise pipeline.StageDeferred('summary pipeline claim changed before publication')
-    conn.execute("INSERT INTO recording_summary_variants(recording_id,language,summary,summary_json,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(recording_id,language) DO UPDATE SET summary=excluded.summary,summary_json=excluded.summary_json,updated_at=excluded.updated_at", (rid, 'en', markdown.strip() + '\n', json.dumps(structured, ensure_ascii=False), pipeline.stamp()))
+    conn.execute("INSERT INTO recording_summary_variants(recording_id,language,summary,summary_json,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(recording_id,language) DO UPDATE SET summary=excluded.summary,summary_json=excluded.summary_json,updated_at=excluded.updated_at", (rid, language, markdown.strip() + '\n', json.dumps(structured, ensure_ascii=False), pipeline.stamp()))
     conn.commit()
     return None
 

@@ -99,6 +99,21 @@ SPEAKER_STORE_PATH = None
 MAX_NAMES_PER_REQUEST = speakers.MAX_SPEAKERS
 MAX_COMMENT_LEN = 2000
 
+
+def _summary_language(value):
+    language = value.strip().lower() if isinstance(value, str) else ""
+    if not re.fullmatch(r"[a-z]{2,3}(?:-[a-z0-9]{2,8}){0,3}", language):
+        raise HTTPException(status_code=400, detail="invalid language")
+    return language
+
+
+def _request_summary_language(rec_id, language):
+    if language == "en":  # keep old connectors compatible
+        return control_client.ControlClient().request("summary_en", rec_id)
+    return control_client.ControlClient().request(
+        "summary_language", rec_id, language=language
+    )
+
 # Every message a mutation may show. Russian, about the reader's own request,
 # and deliberately free of engine names, paths, ids and exception text.
 MSG_RU = {
@@ -452,10 +467,21 @@ def _pipeline_status(rec_id):
     conn = db()
     try:
         try:
-            rows = conn.execute("SELECT stage,state FROM pipeline_jobs WHERE recording_id=?", (rec_id,)).fetchall()
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(pipeline_jobs)")}
+            if "summary_language" in columns:
+                rows = conn.execute(
+                    "SELECT stage,state,COALESCE(summary_language,'en') AS language "
+                    "FROM pipeline_jobs WHERE recording_id=?",
+                    (rec_id,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT stage,state,'en' AS language FROM pipeline_jobs WHERE recording_id=?",
+                    (rec_id,),
+                ).fetchall()
         except sqlite3.Error:
             return {}
-        return {row["stage"]: {"state": row["state"]} for row in rows}
+        return {row["stage"]: {"state": row["state"], "language": row["language"]} for row in rows}
     finally:
         conn.close()
 
@@ -666,7 +692,7 @@ def mindmap_png(rec_id: str):
 @app.get("/api/recordings")
 def list_recordings(limit: int = 50, offset: int = 0, archived: bool = False,
                     page: str = "", cursor: str = "", lang: str = "ru"):
-    requested_language = "en" if lang == "en" else "ru"
+    requested_language = _summary_language(lang)
     cursor_mode = page == "cursor"
     limit = 20 if cursor_mode else max(1, min(limit, 200))
     offset = 0 if cursor_mode else max(0, offset)
@@ -726,12 +752,12 @@ def list_recordings(limit: int = 50, offset: int = 0, archived: bool = False,
         ])
         label_definitions, assigned_labels = _recording_labels(conn)
         variants = {}
-        if requested_language == "en" and visible_rows:
+        if requested_language != "ru" and visible_rows:
             try:
                 placeholders = ",".join("?" for _ in visible_rows)
                 variants = {row["recording_id"]: row for row in conn.execute(
-                    f"SELECT recording_id,summary,summary_json FROM recording_summary_variants WHERE language='en' AND recording_id IN ({placeholders})",
-                    tuple(row["id"] for row in visible_rows))}
+                    f"SELECT recording_id,summary,summary_json FROM recording_summary_variants WHERE language=? AND recording_id IN ({placeholders})",
+                    (requested_language, *tuple(row["id"] for row in visible_rows)))}
             except sqlite3.OperationalError:
                 variants = {}
     finally:
@@ -743,21 +769,22 @@ def list_recordings(limit: int = 50, offset: int = 0, archived: bool = False,
         selected_markdown = variant["summary"] if variant else (r["summary"] if requested_language == "ru" else None)
         summ = _summary_plain(selected_markdown)
         summary_state = {"language": requested_language, "state": "ready", "retryable": False}
-        if requested_language == "en" and not variant:
+        if requested_language != "ru" and not variant:
             if not (r["summary"] or "").strip():
-                summary_state = {"language": "en", "state": "waiting_source", "retryable": False}
+                summary_state = {"language": requested_language, "state": "waiting_source", "retryable": False}
             else:
-                job_state = _pipeline_status(r["id"]).get("summary_en", {}).get("state")
+                job = _pipeline_status(r["id"]).get("summary_en", {})
+                job_state = job.get("state") if job.get("language", "en") == requested_language else None
                 if job_state == "failed":
-                    summary_state = {"language": "en", "state": "failed", "retryable": True}
+                    summary_state = {"language": requested_language, "state": "failed", "retryable": True}
                 elif job_state in {"queued", "processing", "retry_wait"}:
-                    summary_state = {"language": "en", "state": job_state, "retryable": job_state == "retry_wait"}
+                    summary_state = {"language": requested_language, "state": job_state, "retryable": job_state == "retry_wait"}
                 else:
                     try:
-                        result = control_client.ControlClient().request("summary_en", r["id"])
-                        summary_state = {"language": "en", "state": result.get("state", "queued"), "retryable": False}
+                        result = _request_summary_language(r["id"], requested_language)
+                        summary_state = {"language": requested_language, "state": result.get("state", "queued"), "retryable": False}
                     except (control_client.ControlRejected, control_client.ControlUnavailable):
-                        summary_state = {"language": "en", "state": "unavailable", "retryable": True}
+                        summary_state = {"language": requested_language, "state": "unavailable", "retryable": True}
         localized_title = (selected_json or {}).get("title") if isinstance(selected_json, dict) else None
         out.append({
             "id": r["id"], "name": localized_title or r["semantic_title"] or r["name"] or "Без названия",
@@ -880,7 +907,7 @@ def _recording_labels(conn, rec_id=None):
 
 @app.get("/api/recordings/{rec_id}")
 def get_recording(rec_id: str, lang: str = "ru"):
-    requested_language = "en" if lang == "en" else "ru"
+    requested_language = _summary_language(lang)
     conn = db()
     try:
         columns = _table_columns(conn)
@@ -919,9 +946,9 @@ def get_recording(rec_id: str, lang: str = "ru"):
         ) if r else None
         canonical_summary_data = _safe_json_object(r["summary_json"]) if r else None
         variant = None
-        if r and requested_language == "en":
+        if r and requested_language != "ru":
             try:
-                variant = conn.execute("SELECT summary,summary_json FROM recording_summary_variants WHERE recording_id=? AND language='en'", (rec_id,)).fetchone()
+                variant = conn.execute("SELECT summary,summary_json FROM recording_summary_variants WHERE recording_id=? AND language=?", (rec_id, requested_language)).fetchone()
             except sqlite3.OperationalError:
                 variant = None
         selected_summary = variant["summary"] if variant else (r["summary"] if requested_language == "ru" and r else None)
@@ -929,7 +956,7 @@ def get_recording(rec_id: str, lang: str = "ru"):
         comments = _recording_comments(conn, rec_id) if r else []
         tasks = _generated_tasks(conn, rec_id, canonical_summary_data) if r else []
         presentation_tasks = (_localized_tasks(summary_data, tasks)
-                              if requested_language == "en" else tasks)
+                              if requested_language != "ru" else tasks)
         summary_card_data = summary_card.content_model(summary_data, presentation_tasks) if r and summary_data else None
         label_definitions, assigned_labels = _recording_labels(conn, rec_id) if r else ([], {})
     finally:
@@ -939,20 +966,21 @@ def get_recording(rec_id: str, lang: str = "ru"):
     names = _speaker_names(None, rec_id)
     jobs = _pipeline_status(rec_id)
     summary_state = {"language": requested_language, "state": "ready", "retryable": False}
-    if requested_language == "en" and not variant:
-        state = jobs.get("summary_en", {}).get("state")
+    if requested_language != "ru" and not variant:
+        job = jobs.get("summary_en", {})
+        state = job.get("state") if job.get("language", "en") == requested_language else None
         if state == "failed":
-            summary_state = {"language": "en", "state": "failed", "retryable": True}
+            summary_state = {"language": requested_language, "state": "failed", "retryable": True}
         elif state in {"queued", "processing", "retry_wait"}:
-            summary_state = {"language": "en", "state": state, "retryable": state == "retry_wait"}
+            summary_state = {"language": requested_language, "state": state, "retryable": state == "retry_wait"}
         else:
             try:
-                result = control_client.ControlClient().request("summary_en", rec_id)
-                summary_state = {"language": "en", "state": result.get("state", "queued"), "retryable": False}
+                result = _request_summary_language(rec_id, requested_language)
+                summary_state = {"language": requested_language, "state": result.get("state", "queued"), "retryable": False}
             except control_client.ControlRejected:
-                summary_state = {"language": "en", "state": "error", "retryable": True}
+                summary_state = {"language": requested_language, "state": "error", "retryable": True}
             except control_client.ControlUnavailable:
-                summary_state = {"language": "en", "state": "unavailable", "retryable": True}
+                summary_state = {"language": requested_language, "state": "unavailable", "retryable": True}
     diarization_pending = jobs.get("diarization", {}).get("state") in {"queued", "processing", "retry_wait"}
     label_names = _speaker_label_names(None, rec_id)
     speaker_payload = _present_voiceprint_labels(
@@ -974,7 +1002,7 @@ def get_recording(rec_id: str, lang: str = "ru"):
         json.dumps(label_names, ensure_ascii=False, sort_keys=True),
     ])
     canonical_display_name = r["semantic_title"] or r["name"] or "Без названия"
-    display_name = ((summary_data or {}).get("title") if requested_language == "en" else None) or canonical_display_name
+    display_name = ((summary_data or {}).get("title") if requested_language != "ru" else None) or canonical_display_name
     mindmap_tree = _mindmap_tree(
         canonical_display_name, r["summary_json"], r["summary"],
         speakers.apply_names_to_text(asr_transcript or plaud_transcript, label_names),
@@ -1036,19 +1064,22 @@ def get_recording(rec_id: str, lang: str = "ru"):
     }
 
 
-@app.post("/api/recordings/{rec_id}/summary/en/retry")
-def retry_english_summary(rec_id: str, request: Request):
+@app.post("/api/recordings/{rec_id}/summary/{language}/retry")
+def retry_summary(rec_id: str, language: str, request: Request):
     if not csrf_ok(request):
         return _bad(MSG_RU["no_csrf"], status=403)
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", rec_id) or not _recording_row(rec_id):
         return _bad(MSG_RU["not_found"], status=404)
+    language = _summary_language(language)
+    if language == "ru":
+        return _bad(MSG_RU["bad_request"])
     try:
-        result = control_client.ControlClient().request("summary_en", rec_id)
+        result = _request_summary_language(rec_id, language)
     except control_client.ControlRejected:
         return _bad(MSG_RU["bad_request"])
     except control_client.ControlUnavailable:
         return _bad(MSG_RU["unavailable"], status=503)
-    return {"language": "en", "state": result.get("state", "queued")}
+    return {"language": language, "state": result.get("state", "queued")}
 
 
 @app.get("/api/csrf")

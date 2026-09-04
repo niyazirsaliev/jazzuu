@@ -55,3 +55,18 @@ def test_failed_english_job_is_visible_and_retry_requires_csrf(tmp_path, monkeyp
 def test_english_summary_api_requires_authentication(tmp_path, monkeypatch):
     path=tmp_path/'a.db'; database(path,variant=True); client(path,monkeypatch)
     assert TestClient(main.app).get('/api/recordings/r1',params={'lang':'en'}).status_code==401
+
+
+def test_first_japanese_access_queues_selected_language(tmp_path, monkeypatch):
+    path=tmp_path/'a.db'; database(path); c=client(path,monkeypatch); calls=[]
+    class FakeClient:
+        def request(self, action, rec_id, **kw): calls.append((action,rec_id,kw)); return {'state':'queued'}
+    monkeypatch.setattr(main.control_client,'ControlClient',FakeClient)
+    data=c.get('/api/recordings/r1',params={'lang':'ja'}).json()
+    assert calls==[('summary_language','r1',{'language':'ja'})]
+    assert data['summary_language']=='ja' and data['summary_state']['state']=='queued'
+
+
+def test_invalid_summary_language_is_rejected(tmp_path, monkeypatch):
+    path=tmp_path/'a.db'; database(path); c=client(path,monkeypatch)
+    assert c.get('/api/recordings/r1',params={'lang':'../../etc/passwd'}).status_code==400

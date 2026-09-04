@@ -33,7 +33,8 @@ _TASK_RE = re.compile(r"[a-f0-9]{24}\Z")
 _FORBIDDEN_NAME = re.compile(r"[\x00-\x1f\x7f<>&\"\\`]")
 ACTIONS = frozenset(("rename", "retranscribe", "regenerate", "diarize",
                       "add_comment", "set_task_completed", "set_label",
-                      "archive", "restore", "delete", "source_poll", "summary_en"))
+                      "archive", "restore", "delete", "source_poll", "summary_en",
+                      "summary_language"))
 
 
 class ControlUnavailable(RuntimeError):
@@ -130,7 +131,7 @@ def ensure_schema(conn):
         recording_id TEXT NOT NULL, body TEXT NOT NULL, created_at TEXT NOT NULL)''')
     conn.execute('''CREATE INDEX IF NOT EXISTS recording_comments_recording
         ON recording_comments(recording_id, id)''')
-    conn.execute("CREATE TABLE IF NOT EXISTS recording_summary_variants(recording_id TEXT NOT NULL, language TEXT NOT NULL CHECK(language IN ('en')), summary TEXT NOT NULL, summary_json TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(recording_id, language))")
+    pipeline.ensure_summary_variants_schema(conn)
     conn.execute('''CREATE TABLE IF NOT EXISTS recording_task_states(
         recording_id TEXT NOT NULL, task_id TEXT NOT NULL,
         completed INTEGER NOT NULL CHECK(completed IN (0,1)), updated_at TEXT NOT NULL,
@@ -265,7 +266,7 @@ def _archive_action(conn, recording_id, action):
 
 def apply(conn, action, recording_id, aliases=None, *, comment=None,
           task_id=None, completed=None, label_id=None, label_name=None,
-          active=None):
+          active=None, language=None):
     if action not in ACTIONS or not isinstance(recording_id, str) or not _RECORDING_RE.fullmatch(recording_id):
         raise ControlRejected("bad request")
     ensure_schema(conn)
@@ -284,6 +285,8 @@ def apply(conn, action, recording_id, aliases=None, *, comment=None,
             state = "queued" if pipeline.request_diarize(conn, recording_id, commit=False) else "already_queued"
         elif action == "summary_en":
             state = "queued" if pipeline.request_summary_language(conn, recording_id, "en", commit=False) else "already_queued"
+        elif action == "summary_language":
+            state = "queued" if pipeline.request_summary_language(conn, recording_id, language, commit=False) else "already_queued"
         elif action == "add_comment":
             body = _clean_comment(comment)
             count = conn.execute(
@@ -409,7 +412,7 @@ class ControlServer:
             request = json.loads(raw.decode("utf-8"))
             allowed = {"token", "action", "recording_id", "aliases", "comment", "task_id", "completed",
                        "label_id", "label_name", "active", "display_name", "is_self",
-                       "consent_status", "person_id", "speaker_id"}
+                       "consent_status", "person_id", "speaker_id", "language"}
             if not isinstance(request, dict) or set(request) - allowed: raise ControlRejected("bad")
             presented, expected = request.get("token"), _token(self.token_path)
             if not isinstance(presented, str) or not hmac.compare_digest(presented, expected): return {"ok": False, "error": "unauthorized"}
@@ -432,11 +435,11 @@ class ControlServer:
                 request.get("aliases"), comment=request.get("comment"),
                 task_id=request.get("task_id"), completed=request.get("completed"),
                 label_id=request.get("label_id"), label_name=request.get("label_name"),
-                active=request.get("active"))
+                active=request.get("active"), language=request.get("language"))
             finally: conn.close()
             if outcome.get("state") == "deleted":
                 self._cleanup_local(request.get("recording_id"))
-            if request.get("action") in {"retranscribe", "regenerate", "rename", "diarize"}:
+            if request.get("action") in {"retranscribe", "regenerate", "rename", "diarize", "summary_en", "summary_language"}:
                 self.waker.wake()
             return outcome
         except ControlRejected: return {"ok": False, "error": "bad_request"}
@@ -520,7 +523,7 @@ class ControlClient:
 
     def request(self, action, recording_id, aliases=None, *, comment=None,
                 task_id=None, completed=None, label_id=None, label_name=None,
-                active=None):
+                active=None, language=None):
         token = _token(self.token_path)
         request = {"token": token, "action": action, "recording_id": recording_id}
         if aliases is not None: request["aliases"] = aliases
@@ -530,6 +533,7 @@ class ControlClient:
         if label_id is not None: request["label_id"] = label_id
         if label_name is not None: request["label_name"] = label_name
         if active is not None: request["active"] = active
+        if language is not None: request["language"] = language
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as peer:
                 peer.settimeout(self.timeout); peer.connect(self.socket_path); peer.sendall(json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode() + b"\n")

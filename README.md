@@ -26,8 +26,9 @@ Jazzuu.
 - **Labels** recordings automatically — work, personal, idea — and lets you
   correct any label by hand.
 - **Serves** a mobile-first reader: search-first, twenty recordings per page,
-  one global RU/EN switch that changes the current interface and summary
-  presentation. This switch does not limit transcription languages.
+  a RU/EN interface switch, and a separate report-language field accepting
+  BCP-47-style codes such as `ja`, `fr` or `pt-BR` when supported by the
+  configured summary model.
 - **Shares** a single recording via an opaque, expiring link when you choose
   to.
 
@@ -79,6 +80,10 @@ authorized audio to the configured Tilmech endpoint and stores the returned
 language code as metadata, including mixed values such as `fr+ar` or `ja+en`.
 The reader renders unfamiliar ISO language codes generically instead of
 rejecting them.
+
+Readers choose a report language on the Summary tab. Jazzuu stores each
+generated variant separately; changing it never rewrites the transcript or
+the canonical summary.
 
 Choose the specialist profile in the Tilmech deployment:
 

@@ -6,6 +6,14 @@ let uiLanguage = (() => {
   try { return localStorage.getItem(UI_LANGUAGE_KEY) === 'en' ? 'en' : 'ru'; }
   catch (_) { return 'ru'; }
 })();
+const SUMMARY_LANGUAGE_KEY = 'audio-summary-language';
+function validSummaryLanguage(value) { return /^[a-z]{2,3}(?:-[a-z0-9]{2,8}){0,3}$/.test(String(value || '').trim().toLowerCase()); }
+let summaryLanguage = (() => {
+  try {
+    const saved = localStorage.getItem(SUMMARY_LANGUAGE_KEY);
+    return validSummaryLanguage(saved) ? saved.trim().toLowerCase() : uiLanguage;
+  } catch (_) { return uiLanguage; }
+})();
 const EN_TEXT = {
   'Записи': 'Recordings', 'Архив': 'Archive', 'Поиск': 'Search', 'Обновить': 'Refresh',
   'Проверить PLAUD': 'Check PLAUD', 'Показать ещё': 'Load more',
@@ -81,16 +89,32 @@ function localizedPreserving(html, values) {
   for (const [token, rendered] of saved) out = out.split(token).join(rendered);
   return out;
 }
-function languageQuery() { return uiLanguage === 'en' ? '&lang=en' : ''; }
+function languageQuery() { return summaryLanguage === 'ru' ? '' : `&lang=${encodeURIComponent(summaryLanguage)}`; }
 function languageToggleHtml() {
   return `<button type="button" data-language-toggle aria-label="${uiLanguage === 'en' ? 'Switch interface to Russian' : 'Переключить интерфейс на английский'}" class="min-w-11 min-h-11 px-2 rounded-xl border border-line/60 text-[12px] font-bold">${uiLanguage === 'en' ? 'RU' : 'EN'}</button>`;
 }
 function toggleLanguage() {
+  const followedShell = summaryLanguage === uiLanguage;
   uiLanguage = uiLanguage === 'en' ? 'ru' : 'en';
   try { localStorage.setItem(UI_LANGUAGE_KEY, uiLanguage); } catch (_) {}
+  if (followedShell) setSummaryLanguage(uiLanguage, false);
   if (document.documentElement) document.documentElement.setAttribute('lang', uiLanguage);
   _feedCursor = null; _feedRows = [];
   route();
+}
+function setSummaryLanguage(value, reroute = true) {
+  const language = String(value || '').trim().toLowerCase();
+  if (!validSummaryLanguage(language)) return false;
+  summaryLanguage = language;
+  try { localStorage.setItem(SUMMARY_LANGUAGE_KEY, language); } catch (_) {}
+  _feedCursor = null; _feedRows = [];
+  if (reroute) route();
+  return true;
+}
+function summaryLanguageControlHtml() {
+  const label = uiLanguage === 'en' ? 'Report language' : 'Язык отчёта';
+  const apply = uiLanguage === 'en' ? 'Apply' : 'Применить';
+  return `<div class="mb-3 flex items-end gap-2"><label class="flex-1 text-xs text-mut">${label}<input data-summary-language required pattern="[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8}){0,3}" value="${esc(summaryLanguage)}" placeholder="ru, en, ja, pt-BR" class="mt-1 min-h-11 w-full rounded-xl border border-line/60 bg-ink px-3 text-white"></label><button type="button" data-summary-language-apply class="min-h-11 rounded-xl border border-line px-3 font-semibold">${apply}</button></div>`;
 }
 
 // ---------- helpers ----------
@@ -509,12 +533,18 @@ app.addEventListener('click', (event) => {
   }
   const languageToggle = target.closest('[data-language-toggle]');
   if (languageToggle) { toggleLanguage(); return; }
+  const summaryLanguageApply = target.closest('[data-summary-language-apply]');
+  if (summaryLanguageApply) {
+    const input = document.querySelector('[data-summary-language]');
+    if (input && !setSummaryLanguage(input.value)) input.setAttribute('aria-invalid', 'true');
+    return;
+  }
   const loadMore = target.closest('[data-load-more]');
   if (loadMore) { renderFeed({ append: true, gen: _navGen }); return; }
   const archiveMore = target.closest('[data-archive-more]');
   if (archiveMore) { renderArchive(_navGen, true); return; }
   const summaryRetry = target.closest('[data-summary-retry]');
-  if (summaryRetry) { retryEnglishSummary(summaryRetry.getAttribute('data-rec')); return; }
+  if (summaryRetry) { retrySummary(summaryRetry.getAttribute('data-rec'), summaryRetry.getAttribute('data-language')); return; }
   const refresh = target.closest('[data-view-refresh]');
   if (refresh) { refreshCurrentView(refresh); return; }
   const sourcePoll = target.closest('[data-source-poll]');
@@ -1561,26 +1591,28 @@ const DETAIL_TABS = ['summary', 'transcript', 'speakers'];
 function summaryStateHtml(r) {
   const state = r && r.summary_state && r.summary_state.state;
   if (!state || state === 'ready') return '';
+  const code = String((r.summary_state && r.summary_state.language) || summaryLanguage).toLowerCase();
+  const language = code === 'en' ? 'English' : code.toUpperCase();
   const messages = {
-    queued: 'English summary is queued.', processing: 'English summary is being generated.',
-    retry_wait: 'English summary will retry shortly.', failed: 'English summary generation failed.',
-    unavailable: 'English summary service is temporarily unavailable.', error: 'English summary could not be requested.'
+    queued: `${language} summary is queued.`, processing: `${language} summary is being generated.`,
+    retry_wait: `${language} summary will retry shortly.`, failed: `${language} summary generation failed.`,
+    unavailable: `${language} summary service is temporarily unavailable.`, error: `${language} summary could not be requested.`
   };
   const retry = r.summary_state.retryable
-    ? `<button type="button" data-summary-retry data-rec="${esc(r.id)}" class="mt-3 min-h-11 rounded-xl border border-line px-4 font-semibold">Retry</button>` : '';
-  return `<div class="bg-card border border-line/50 rounded-2xl p-4 text-sm text-mut" role="status">${esc(messages[state] || 'English summary is pending.')}${retry}</div>`;
+    ? `<button type="button" data-summary-retry data-language="${esc(summaryLanguage)}" data-rec="${esc(r.id)}" class="mt-3 min-h-11 rounded-xl border border-line px-4 font-semibold">Retry</button>` : '';
+  return `<div class="bg-card border border-line/50 rounded-2xl p-4 text-sm text-mut" role="status">${esc(messages[state] || `${language} summary is pending.`)}${retry}</div>`;
 }
 
-async function retryEnglishSummary(recId) {
+async function retrySummary(recId, language) {
   try {
-    await apiPost(`/api/recordings/${encodeURIComponent(recId)}/summary/en/retry`, {});
+    await apiPost(`/api/recordings/${encodeURIComponent(recId)}/summary/${encodeURIComponent(language)}/retry`, {});
     if (_detail && _detail.id === recId) {
-      _detail.summary_state = {language:'en', state:'queued', retryable:false};
+      _detail.summary_state = {language, state:'queued', retryable:false};
       showTab('summary');
     }
   } catch (e) {
     if (_detail && _detail.id === recId) {
-      _detail.summary_state = {language:'en', state:'error', retryable:true};
+      _detail.summary_state = {language, state:'error', retryable:true};
       showTab('summary');
     }
   }
@@ -1617,7 +1649,7 @@ function showTab(tab) {
     const summaryBlock = r.summary
       ? `<div class="bg-card border border-line/50 rounded-2xl p-4 text-[15px] leading-relaxed md">${renderMd(r.summary)}</div>`
       : (summaryStateHtml(r) || `<div class="text-mut text-sm bg-card border border-line/50 rounded-2xl p-4">Резюме ещё не готово.</div>`);
-    body.innerHTML = localized(`<div class="fade-in">${summaryInfographicHtml(r)}${asrRouteHtml(r)}${summaryBlock}${mindmapHtml(r)}${reprocessHtml(r)}</div>`);
+    body.innerHTML = localized(`<div class="fade-in">${summaryLanguageControlHtml()}${summaryInfographicHtml(r)}${asrRouteHtml(r)}${summaryBlock}${mindmapHtml(r)}${reprocessHtml(r)}</div>`);
   } else {
     body.innerHTML = `<div class="fade-in">${transcriptTabHtml(r)}${localized(reprocessHtml(r))}</div>`;
   }
@@ -1787,7 +1819,7 @@ async function renderDetail(id, gen) {
   const at = gen == null ? _navGen : gen;
   app.innerHTML = header('', { back: '#/' }) + skeletonFeed();
   let r;
-  try { r = await api('/api/recordings/' + encodeURIComponent(id) + (uiLanguage === 'en' ? '?lang=en' : '')); }
+  try { r = await api('/api/recordings/' + encodeURIComponent(id) + (summaryLanguage === 'ru' ? '' : `?lang=${encodeURIComponent(summaryLanguage)}`)); }
   catch (e) {
     if (e.message !== 'unauth' && !stale(at)) {
       app.innerHTML = header('', { back:'#/' }) + errBox('Запись не найдена');
@@ -1799,7 +1831,7 @@ async function renderDetail(id, gen) {
 
   setDisplayTimezone(r && r.display_timezone);
   _detail = r;
-  _detailTab = (r.summary_data || r.summary || r.has_mindmap || (r.summary_state && r.summary_state.language === 'en')) ? 'summary' : 'transcript';
+  _detailTab = (r.summary_data || r.summary || r.has_mindmap || (r.summary_state && r.summary_state.language !== 'ru')) ? 'summary' : 'transcript';
 
   const d = recordingDate(r);
   const dateLine = compactDateTime(d);
@@ -1859,7 +1891,7 @@ async function renderDetail(id, gen) {
 // playback and position survive every tick.
 async function refreshDetail(id, gen) {
   let r;
-  try { r = await api('/api/recordings/' + encodeURIComponent(id) + (uiLanguage === 'en' ? '?lang=en' : '')); }
+  try { r = await api('/api/recordings/' + encodeURIComponent(id) + (summaryLanguage === 'ru' ? '' : `?lang=${encodeURIComponent(summaryLanguage)}`)); }
   catch (e) { return null; }   // transient: retry on the next tick
   // Dropped if the reader navigated away, or opened a different recording,
   // while this was in flight — a late response must never repaint a new view.

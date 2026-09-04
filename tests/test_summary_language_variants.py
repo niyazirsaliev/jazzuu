@@ -51,3 +51,46 @@ def test_control_action_retries_failed_english_job():
     assert control.apply(conn, "summary_en", "r1")["state"] == "queued"
     conn.execute("UPDATE pipeline_jobs SET state='failed' WHERE recording_id='r1' AND stage=?", (pipeline.STAGE_SUMMARY_EN,)); conn.commit()
     assert control.apply(conn, "summary_en", "r1")["state"] == "queued"
+
+
+def test_arbitrary_summary_language_is_queued_and_published_separately():
+    conn = database()
+    assert pipeline.request_summary_language(conn, "r1", "ja") is True
+    job = pipeline.claim_next(conn, stages=(pipeline.STAGE_SUMMARY_EN,))
+    assert job["summary_language"] == "ja"
+    calls = []
+
+    class Summary:
+        @staticmethod
+        def call(name, args, sid):
+            calls.append((name, args, sid))
+            return {"summary_markdown": "# 日本語\n", "structured": {"title": "日本語"}}
+
+    stages.summary_en_stage(conn, job, Summary, "sid")
+    variant = conn.execute(
+        "SELECT language,summary FROM recording_summary_variants WHERE recording_id='r1'"
+    ).fetchone()
+    assert variant == ("ja", "# 日本語\n")
+    assert calls[0][1]["target_language"] == "ja"
+
+
+def test_summary_language_rejects_non_bcp47_input():
+    conn = database()
+    for value in ("", "../../etc/passwd", "en<script>", "x" * 100):
+        try:
+            pipeline.request_summary_language(conn, "r1", value)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(value)
+
+
+def test_english_only_variant_table_migrates_without_data_loss():
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE recordings(id TEXT PRIMARY KEY)")
+    conn.execute("INSERT INTO recordings VALUES('r1')")
+    conn.execute("CREATE TABLE recording_summary_variants(recording_id TEXT NOT NULL,language TEXT NOT NULL CHECK(language IN ('en')),summary TEXT NOT NULL,summary_json TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(recording_id,language))")
+    conn.execute("INSERT INTO recording_summary_variants VALUES('r1','en','English','{}','now')")
+    control.ensure_schema(conn)
+    conn.execute("INSERT INTO recording_summary_variants VALUES('r1','ja','日本語','{}','now')")
+    assert conn.execute("SELECT language FROM recording_summary_variants ORDER BY language").fetchall() == [("en",), ("ja",)]
