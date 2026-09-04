@@ -10,21 +10,24 @@ Voice recorders give you audio. Jazzuu turns recordings into
 something you can actually search a year later: transcribed, summarised,
 labelled, and readable on a phone.
 
-Built for speech that mixes Kyrgyz, Russian and English in the same
-sentence, which is why transcription quality in mixed speech drove most of the
-design.
+Built for multilingual and code-switched speech. Kyrgyz, Russian and English
+are useful examples, not a fixed language list: deployments can install a
+compatible specialist model for another language in Tilmech without changing
+Jazzuu.
 
 ## What it does
 
 - **Ingests** audio from a hardware recorder, a watched folder, or an upload.
 - **Transcribes** it via [Tilmech](https://github.com/niyazirsaliev/tilmech),
-  which routes Kyrgyz and code-switched speech between two engines.
+  which routes a deployment-selected specialist language and multilingual
+  speech between two engines.
 - **Summarises** each recording into a title, a summary, action items and a
   mind map, in the reader's language.
 - **Labels** recordings automatically — work, personal, idea — and lets you
   correct any label by hand.
 - **Serves** a mobile-first reader: search-first, twenty recordings per page,
-  one global RU/EN switch that changes both interface and summaries.
+  one global RU/EN switch that changes the current interface and summary
+  presentation. This switch does not limit transcription languages.
 - **Shares** a single recording via an opaque, expiring link when you choose
   to.
 
@@ -68,6 +71,30 @@ read-only: nothing an agent does can alter or delete a recording.
 - A [Tilmech](https://github.com/niyazirsaliev/tilmech) instance for transcription
 - An OpenAI-compatible endpoint for summarisation — a local model works
 - Optional: Tailscale, if you want the reader reachable only inside your own network
+
+## Use any specialist language
+
+Jazzuu does not bundle or hardcode an ASR language model. It sends tenant-
+authorized audio to the configured Tilmech endpoint and stores the returned
+language code as metadata, including mixed values such as `fr+ar` or `ja+en`.
+The reader renders unfamiliar ISO language codes generically instead of
+rejecting them.
+
+Choose the specialist profile in the Tilmech deployment:
+
+```env
+ASR_SPECIALIST_MODEL=your-org/your-language-model
+ASR_SPECIALIST_REVISION=0123456789abcdef0123456789abcdef01234567
+ASR_SPECIALIST_LANGUAGE=fr
+ASR_SPECIALIST_MARKERS=éèêëàâçîïôùûüÿœ
+ASR_GENERAL_CONFIDENT_LANGUAGES=en,de,es
+```
+
+The model must be compatible with Tilmech's specialist pipeline, and its
+revision must be an immutable commit SHA. Keep the specialist language out of
+`ASR_GENERAL_CONFIDENT_LANGUAGES` so the general route cannot bypass it. See
+[Tilmech's configuration documentation](https://github.com/niyazirsaliev/tilmech)
+for the complete contract.
 
 ## Quick start
 

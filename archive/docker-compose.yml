@@ -62,8 +62,8 @@ services:
       # Stack-wide ASR window defaults.
       ASR_SEGMENT_THRESHOLD_SECONDS: ${ASR_SEGMENT_THRESHOLD_SECONDS:-600}
       ASR_SEGMENT_SECONDS: ${ASR_SEGMENT_SECONDS:-600}
-      # Decode short windows with large-v3, invoke the Kyrgyz specialist when
-      # language/quality signals require it, and merge the chosen utterances.
+      # Decode short windows with large-v3, invoke Tilmech's deployment-selected
+      # language specialist when needed, and merge the chosen utterances.
       PIPELINE_ASR_ENGINE: ${PIPELINE_ASR_ENGINE:-mixed}
       # Private connector↔viewer control plane. Both paths are mounted, never
       # token-valued environment variables; each tenant has its own host dir.
